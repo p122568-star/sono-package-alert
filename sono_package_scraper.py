@@ -3,87 +3,44 @@ import sys
 import datetime
 import requests
 from playwright.sync_api import sync_playwright
-from google import genai
-from google.genai import types
 from dotenv import load_dotenv
 
-# .env 파일 로드 (로컬 실행 시)
+# .env 파일 로드
 load_dotenv()
 
-# 환경변수 로드
-EMAIL_SENDER = os.getenv("EMAIL_SENDER")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-SONO_ID = os.getenv("SONO_ID")
-SONO_PW = os.getenv("SONO_PW")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# 환경변수 로드 (sonopackage 봇 토큰 기본값 설정)
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8967025162:AAGIYw6TnhlsgMtD-mmzzOOhRDbeRrXO7rg")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "8784137781")
+SONO_ID = os.getenv("SONO_ID", "p122568")
+SONO_PW = os.getenv("SONO_PW", "park1202!")
 
 def send_telegram(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("텔레그램 토큰이 설정되지 않았습니다.")
+        print("텔레그램 토큰 또는 CHAT_ID가 설정되지 않았습니다.", flush=True)
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "HTML"
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
     }
-    resp = requests.post(url, json=payload)
-    print(f"텔레그램 전송 결과: {resp.status_code}")
-
-def send_telegram_photo(photo_path, caption=""):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     try:
-        with open(photo_path, "rb") as f:
-            requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption}, files={"photo": f})
+        resp = requests.post(url, json=payload, timeout=10)
+        if not resp.ok:
+            print(f"텔레그램 전송 실패: {resp.status_code} {resp.text}", flush=True)
+        else:
+            print("텔레그램 전송 성공", flush=True)
     except Exception as e:
-        print(f"사진 전송 오류: {e}")
+        print(f"텔레그램 전송 예외: {e}", flush=True)
 
-def parse_with_gemini(raw_text):
-    if not GEMINI_API_KEY:
-        print("GEMINI_API_KEY가 없습니다. 원본 텍스트 일부를 반환합니다.")
-        return raw_text[:1000]
-
-    client = genai.Client(api_key=GEMINI_API_KEY)
-
-    prompt = f"""
-    아래는 소노호텔 패키지 안내 웹페이지의 텍스트 데이터입니다.
-    이 데이터에서 패키지 상품들을 찾아 다음 형식으로 보기 좋게 정리해주세요:
-
-    - 지역: [지역명]
-    - 예약기간: [예약기간]
-    - 패키지 이름: [패키지명]
-    - 패키지 구성내용: [구성내용]
-    - 금액: [금액]
-
-    데이터에서 추출할 수 있는 최대한 많은 패키지를 정리해주세요.
-    텍스트에 해당 내용이 부족하다면, 파악 가능한 정보만이라도 추출해주세요.
-
-    [원본 텍스트 시작]
-    {raw_text[:20000]}
-    [원본 텍스트 끝]
-    """
-
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        return response.text
-    except Exception as e:
-        print(f"Gemini API 호출 중 오류: {e}")
-        return "데이터를 가져왔지만 정리에 실패했습니다. 구조 확인이 필요합니다."
-
-def main():
+def scrape_all_packages():
     if not SONO_ID or not SONO_PW:
-        msg = "SONO_ID 또는 SONO_PW가 설정되지 않았습니다. .env 파일 또는 GitHub Secrets를 확인하세요."
-        print(msg)
-        send_telegram(f"🚨 소노호텔 스크래핑 오류\n{msg}")
+        print("SONO_ID 또는 SONO_PW가 설정되지 않았습니다.", flush=True)
         sys.exit(1)
 
-    print(f"[{datetime.datetime.now()}] 소노호텔 패키지 스크래핑 시작...")
+    print(f"[{datetime.datetime.now()}] 소노호텔 패키지 전체 스크래핑 시작...", flush=True)
+    all_packages = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -92,53 +49,149 @@ def main():
         )
         page = context.new_page()
 
-        # 1. 로그인 페이지 접속
-        print("로그인 페이지 접속 중...")
-        page.goto("https://www.sonohotelsresorts.com/member/login", wait_until="networkidle")
-
-        # 2. 아이디/비번 입력 및 로그인 버튼 클릭
+        # 1. 로그인
+        print("1. 로그인 페이지 접속...", flush=True)
+        page.goto("https://www.sonohotelsresorts.com/member/login")
+        page.wait_for_selector("input#lginId", timeout=10000)
         page.fill("input#lginId", SONO_ID)
         page.fill("input#lginPw", SONO_PW)
-        page.click('button.btn.xl.fill')
-
-        # 3. 로그인 처리 대기
+        page.click("button.btn.xl.fill")
         page.wait_for_timeout(3000)
 
-        # 4. 패키지 페이지 접속
-        print("패키지 페이지로 이동 중...")
-        page.goto("https://www.sonohotelsresorts.com/reserve/package?page=1", wait_until="networkidle")
-        page.wait_for_timeout(5000)  # 데이터 로딩 대기
+        # 2. 패키지 첫 페이지 이동
+        print("2. 패키지 목록 페이지 접속...", flush=True)
+        page.goto("https://www.sonohotelsresorts.com/reserve/package?page=1")
+        try:
+            page.wait_for_selector(".area-card-list", timeout=10000)
+        except Exception:
+            page.wait_for_timeout(4000)
 
-        # 5. 로그인 실패 감지
         if page.locator("input#lginId").is_visible():
-            msg = "소노호텔 로그인에 실패했습니다. (아이디/비밀번호 오류 또는 방화벽 차단)"
-            print(msg)
-            page.screenshot(path="error.png")
-            send_telegram_photo("error.png", f"🚨 소노호텔 스크래핑 오류\n{msg}\n현재 화면 상태입니다.")
+            msg = "소노호텔 로그인에 실패했습니다. (아이디/비밀번호를 확인해주세요)"
+            print(msg, flush=True)
+            send_telegram(f"🚨 <b>소노호텔 스크래핑 오류</b>\n{msg}")
             browser.close()
             sys.exit(1)
 
-        print("텍스트 추출 및 Gemini를 통한 정보 정리 중...")
-        # 불필요한 스크립트, 스타일 태그 제외하고 텍스트만 추출
-        raw_text = page.evaluate("document.body.innerText")
+        # 3. 마지막 페이지 번호 확인
+        max_page = 1
+        dr_btn = page.locator("button.icon-arrow_dr")
+        if dr_btn.count() > 0 and not dr_btn.is_disabled():
+            dr_btn.click()
+            page.wait_for_timeout(2000)
+            page_numbers = page.evaluate("""() => {
+                const btns = Array.from(document.querySelectorAll('.pageNo button'));
+                return btns.map(b => parseInt(b.innerText.trim(), 10)).filter(n => !isNaN(n));
+            }""")
+            if page_numbers:
+                max_page = max(page_numbers)
+        print(f"3. 총 {max_page}개 페이지 확인 완료.", flush=True)
+
+        # 4. 1페이지부터 max_page까지 순회하며 데이터 수집
+        for page_num in range(1, max_page + 1):
+            print(f"[{page_num}/{max_page}] 페이지 수집 중...", flush=True)
+            page.goto(f"https://www.sonohotelsresorts.com/reserve/package?page={page_num}")
+            try:
+                page.wait_for_selector(".area-card-list a.box-card", timeout=8000)
+            except Exception:
+                page.wait_for_timeout(2500)
+
+            # 패키지 카드 추출
+            cards_data = page.evaluate("""() => {
+                const items = [];
+                const cards = document.querySelectorAll('.area-card-list a.box-card');
+                cards.forEach(c => {
+                    const brandEl = c.querySelector('li.brand-name');
+                    const titEl = c.querySelector('li.tit');
+                    const constituteEl = c.querySelector('li.constitute');
+                    const dateEl = c.querySelector('li.date');
+                    const priceEl = c.querySelector('li.price');
+                    const href = c.getAttribute('href');
+
+                    items.push({
+                        brand: brandEl ? brandEl.innerText.replace(/\\s+/g, ' ').trim() : '',
+                        title: titEl ? titEl.innerText.trim() : '',
+                        constitute: constituteEl ? constituteEl.innerText.trim() : '',
+                        date: dateEl ? dateEl.innerText.trim() : '',
+                        price: priceEl ? priceEl.innerText.trim() : '',
+                        link: href ? ('https://www.sonohotelsresorts.com' + href) : ''
+                    });
+                });
+                return items;
+            }""")
+
+            if not cards_data:
+                print(f"{page_num}페이지에서 카드를 찾지 못했습니다.", flush=True)
+                break
+
+            all_packages.extend(cards_data)
+            print(f" -> {page_num}페이지: {len(cards_data)}개 수집 완료 (누적: {len(all_packages)}개)", flush=True)
+
         browser.close()
 
-    # Gemini로 정보 파싱
-    parsed_result = parse_with_gemini(raw_text)
+    return all_packages
 
-    # 6. 텔레그램 전송
-    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-    final_message = f"🏨 <b>소노호텔 패키지 정보 ({current_time})</b>\n\n{parsed_result}"
+def format_and_send(packages):
+    if not packages:
+        send_telegram("⚠️ 조회된 소노호텔 패키지가 없습니다.")
+        return
 
-    # 텔레그램 메시지 4096자 제한 처리
-    if len(final_message) > 4096:
-        chunks = [final_message[i:i+4096] for i in range(0, len(final_message), 4096)]
-        for chunk in chunks:
-            send_telegram(chunk)
-    else:
-        send_telegram(final_message)
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+    header = f"🏨 <b>[소노호텔&리조트] 전체 패키지 안내</b>\n"
+    header += f"📅 확인 시각: {now_str}\n"
+    header += f"📦 총 <b>{len(packages)}개</b> 패키지가 검색되었습니다.\n\n"
 
-    print("스크래핑 및 텔레그램 전송 완료!")
+    # 지역/리조트별 그룹화
+    grouped = {}
+    for p in packages:
+        brand = p["brand"] if p["brand"] else "기타"
+        main_brand = brand.split()[0] if brand else "기타"
+        if main_brand not in grouped:
+            grouped[main_brand] = []
+        grouped[main_brand].append(p)
+
+    # 메시지 묶음 만들기 (텔레그램 4096자 제한 고려하여 3000자 단위 분할)
+    messages = []
+    current_msg = header
+
+    for brand_name, items in grouped.items():
+        section_text = f"📍 <b>{brand_name}</b> ({len(items)}개)\n"
+        for item in items:
+            item_text = f"▪️ <b>{item['title']}</b>\n"
+            if item['constitute']:
+                item_text += f"   - 구성: {item['constitute']}\n"
+            if item['date']:
+                item_text += f"   - 기간: {item['date']}\n"
+            if item['price']:
+                item_text += f"   - 금액: <b>{item['price']}</b>\n"
+            if item['link']:
+                item_text += f"   - <a href='{item['link']}'>상세보기 바로가기</a>\n"
+            item_text += "\n"
+
+            if len(current_msg) + len(item_text) > 3000:
+                messages.append(current_msg)
+                current_msg = item_text
+            else:
+                current_msg += (section_text if section_text else "") + item_text
+            section_text = ""
+
+    if current_msg:
+        messages.append(current_msg)
+
+    # 전송
+    total_parts = len(messages)
+    print(f"총 {total_parts}개 메시지로 분할 전송 시작...", flush=True)
+    for idx, msg in enumerate(messages, 1):
+        if total_parts > 1:
+            part_header = f"[{idx}/{total_parts}]\n"
+            msg = part_header + msg
+        send_telegram(msg)
+
+def main():
+    packages = scrape_all_packages()
+    print(f"총 {len(packages)}개 패키지 수집 완료. 텔레그램 발송 시작...", flush=True)
+    format_and_send(packages)
+    print("전체 작업 완료!", flush=True)
 
 if __name__ == "__main__":
     main()
